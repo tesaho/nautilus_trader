@@ -16,7 +16,7 @@
 Hyperliquid blockchain integration adapter.
 
 This subpackage provides an instrument provider, data and execution clients,
-configurations, and constants for connecting to and interacting with Hyperliquids's API.
+configurations, and constants for connecting to and interacting with Hyperliquid's API.
 
 For convenience, the most commonly used symbols are re-exported at the
 subpackage's top level, so downstream code can simply import from
@@ -28,8 +28,6 @@ from nautilus_trader.adapters.hyperliquid.config import HyperliquidExecClientCon
 from nautilus_trader.adapters.hyperliquid.constants import HYPERLIQUID
 from nautilus_trader.adapters.hyperliquid.constants import HYPERLIQUID_CLIENT_ID
 from nautilus_trader.adapters.hyperliquid.constants import HYPERLIQUID_VENUE
-from nautilus_trader.adapters.hyperliquid.data import HyperliquidDataClient
-from nautilus_trader.adapters.hyperliquid.execution import HyperliquidExecutionClient
 from nautilus_trader.adapters.hyperliquid.factories import HyperliquidLiveDataClientFactory
 from nautilus_trader.adapters.hyperliquid.factories import HyperliquidLiveExecClientFactory
 from nautilus_trader.adapters.hyperliquid.providers import HyperliquidInstrumentProvider
@@ -41,9 +39,7 @@ __all__ = [
     "HYPERLIQUID_VENUE",
     "HyperliquidDataClientConfig",
     "HyperliquidExecClientConfig",
-    "HyperliquidDataClient",
-    "HyperliquidExecutionClient",
+    "HyperliquidInstrumentProvider",
     "HyperliquidLiveDataClientFactory",
     "HyperliquidLiveExecClientFactory",
-    "HyperliquidInstrumentProvider",
 ]

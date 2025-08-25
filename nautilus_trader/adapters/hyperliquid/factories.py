@@ -13,41 +13,113 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 
-"""
-Factory classes for creating live Hyperliquid clients.
-"""
-
-from __future__ import annotations
-
 import asyncio
-from typing import TYPE_CHECKING
+from functools import lru_cache
 
-from nautilus_trader.adapters.hyperliquid.config import HyperliquidDataClientConfig, HyperliquidExecClientConfig
+from nautilus_trader.adapters.hyperliquid.config import HyperliquidDataClientConfig
+from nautilus_trader.adapters.hyperliquid.config import HyperliquidExecClientConfig
 from nautilus_trader.adapters.hyperliquid.data import HyperliquidDataClient
 from nautilus_trader.adapters.hyperliquid.execution import HyperliquidExecutionClient
+from nautilus_trader.adapters.hyperliquid.providers import HyperliquidInstrumentProvider
 from nautilus_trader.cache.cache import Cache
-from nautilus_trader.common.component import LiveClock, MessageBus
-from nautilus_trader.live.factories import LiveDataClientFactory, LiveExecClientFactory
+from nautilus_trader.common.component import LiveClock
+from nautilus_trader.common.component import MessageBus
+from nautilus_trader.config import InstrumentProviderConfig
+from nautilus_trader.core import nautilus_pyo3
+from nautilus_trader.live.factories import LiveDataClientFactory
+from nautilus_trader.live.factories import LiveExecClientFactory
 
-if TYPE_CHECKING:
-    from nautilus_trader.live.data_client import LiveMarketDataClient
-    from nautilus_trader.live.execution_client import LiveExecutionClient
+
+@lru_cache(1)
+def get_cached_hyperliquid_http_client(
+    private_key: str | None = None,
+    wallet_address: str | None = None,
+    base_url: str | None = None,
+    timeout_secs: int = 60,
+    testnet: bool = False,
+) -> nautilus_pyo3.HyperliquidHttpClient:
+    """
+    Cache and return a Hyperliquid HTTP client with the given private key.
+
+    If a cached client with matching parameters already exists, the cached client will be returned.
+
+    Parameters
+    ----------
+    private_key : str, optional
+        The Hyperliquid private key for authentication.
+    wallet_address : str, optional
+        The Hyperliquid wallet address.
+    base_url : str, optional
+        The base URL for the Hyperliquid HTTP API.
+    timeout_secs : int, default 60
+        The timeout for HTTP requests in seconds.
+    testnet : bool, default False
+        If client should connect to testnet.
+
+    Returns
+    -------
+    nautilus_pyo3.HyperliquidHttpClient
+
+    """
+    return nautilus_pyo3.HyperliquidHttpClient(
+        private_key,
+        wallet_address,
+        base_url,
+        timeout_secs,
+        testnet,
+    )
+
+
+@lru_cache(1)
+def get_cached_hyperliquid_websocket_client(
+    private_key: str | None = None,
+    wallet_address: str | None = None,
+    base_url: str | None = None,
+    testnet: bool = False,
+) -> nautilus_pyo3.HyperliquidWebSocketClient:
+    """
+    Cache and return a Hyperliquid WebSocket client with the given private key.
+
+    If a cached client with matching parameters already exists, the cached client will be returned.
+
+    Parameters
+    ----------
+    private_key : str, optional
+        The Hyperliquid private key for authentication.
+    wallet_address : str, optional
+        The Hyperliquid wallet address.
+    base_url : str, optional
+        The base URL for the Hyperliquid WebSocket API.
+    testnet : bool, default False
+        If client should connect to testnet.
+
+    Returns
+    -------
+    nautilus_pyo3.HyperliquidWebSocketClient
+
+    """
+    return nautilus_pyo3.HyperliquidWebSocketClient(
+        private_key,
+        wallet_address,
+        base_url,
+        testnet,
+    )
 
 
 class HyperliquidLiveDataClientFactory(LiveDataClientFactory):
     """
-    Provides a `HyperliquidDataClient` factory.
+    Provides a ``HyperliquidDataClient`` factory.
     """
 
     @staticmethod
-    def create(
+    def create(  # type: ignore
         loop: asyncio.AbstractEventLoop,
         name: str,
         config: HyperliquidDataClientConfig,
         msgbus: MessageBus,
         cache: Cache,
         clock: LiveClock,
-    ) -> LiveMarketDataClient:
+    ) -> HyperliquidDataClient:
         """
         Create a new Hyperliquid data client.
 
@@ -56,7 +128,7 @@ class HyperliquidLiveDataClientFactory(LiveDataClientFactory):
         loop : asyncio.AbstractEventLoop
             The event loop for the client.
         name : str
-            The custom client ID.
+            The client name.
         config : HyperliquidDataClientConfig
             The configuration for the client.
         msgbus : MessageBus
@@ -68,94 +140,62 @@ class HyperliquidLiveDataClientFactory(LiveDataClientFactory):
 
         Returns
         -------
-        LiveMarketDataClient
-            The Hyperliquid data client.
+        HyperliquidDataClient
 
         """
-        # Import here to avoid circular imports during startup
-        try:
-            from nautilus_trader.core.nautilus_pyo3 import HyperliquidHttpClient
-            from nautilus_trader.core.nautilus_pyo3 import HyperliquidWebSocketClient
-        except ImportError:
-            # Fallback for development - create dummy clients
-            class DummyHttpClient:
-                def __init__(self, *args, **kwargs):
-                    pass
-                    
-                async def get_meta(self):
-                    return type('Meta', (), {'universe': []})()
-                    
-                async def get_recent_trades(self, symbol):
-                    return []
-                    
-                async def get_candles(self, symbol, interval, start_time=None, end_time=None):
-                    return []
-                    
-            class DummyWebSocketClient:
-                def __init__(self, *args, **kwargs):
-                    pass
-                    
-                async def connect(self):
-                    pass
-                    
-                async def disconnect(self):
-                    pass
-                    
-                async def subscribe_trades(self, symbol):
-                    pass
-                    
-                async def subscribe_l2_book(self, symbol):
-                    pass
-                    
-                async def unsubscribe(self, subscription_type, symbol):
-                    pass
-                    
-            HyperliquidHttpClient = DummyHttpClient
-            HyperliquidWebSocketClient = DummyWebSocketClient
-
-        # Determine base URLs
-        if config.testnet:
-            base_url = config.base_url or "https://api.hyperliquid-testnet.xyz"
-            ws_base_url = config.ws_base_url or "wss://api.hyperliquid-testnet.xyz/ws"
-        else:
-            base_url = config.base_url or "https://api.hyperliquid.xyz"
-            ws_base_url = config.ws_base_url or "wss://api.hyperliquid.xyz/ws"
-
-        # Create HTTP client
-        http_client = HyperliquidHttpClient(
-            base_url=base_url,
-            timeout=config.timeout_connection * 1000,  # Convert to milliseconds
+        client = get_cached_hyperliquid_http_client(
+            private_key=config.private_key,
+            wallet_address=config.wallet_address,
+            base_url=config.base_url_http,
+            timeout_secs=config.http_timeout_secs or 60,
+            testnet=config.testnet,
         )
 
-        # Create WebSocket client
-        ws_client = HyperliquidWebSocketClient(base_url=ws_base_url)
+        ws_client = get_cached_hyperliquid_websocket_client(
+            private_key=config.private_key,
+            wallet_address=config.wallet_address,
+            base_url=config.base_url_ws,
+            testnet=config.testnet,
+        )
 
-        # Create and return the data client
+        # Create and load the instrument provider
+        provider = HyperliquidInstrumentProvider(
+            client=client,
+            config=InstrumentProviderConfig(
+                load_all=True,
+                load_ids=None,
+                filters=None,
+            ),
+        )
+
         return HyperliquidDataClient(
             loop=loop,
-            client=http_client,
+            client=client,
             ws_client=ws_client,
             msgbus=msgbus,
             cache=cache,
             clock=clock,
-            config=config,
+            instrument_provider=provider,
+            base_url_http=config.base_url_http,
+            base_url_ws=config.base_url_ws,
+            update_instruments_interval_mins=config.update_instruments_interval_mins,
         )
 
 
 class HyperliquidLiveExecClientFactory(LiveExecClientFactory):
     """
-    Provides a `HyperliquidExecutionClient` factory.
+    Provides a ``HyperliquidExecutionClient`` factory.
     """
 
     @staticmethod
-    def create(
+    def create(  # type: ignore
         loop: asyncio.AbstractEventLoop,
         name: str,
         config: HyperliquidExecClientConfig,
         msgbus: MessageBus,
         cache: Cache,
         clock: LiveClock,
-    ) -> LiveExecutionClient:
+    ) -> HyperliquidExecutionClient:
         """
         Create a new Hyperliquid execution client.
 
@@ -164,7 +204,7 @@ class HyperliquidLiveExecClientFactory(LiveExecClientFactory):
         loop : asyncio.AbstractEventLoop
             The event loop for the client.
         name : str
-            The custom client ID.
+            The client name.
         config : HyperliquidExecClientConfig
             The configuration for the client.
         msgbus : MessageBus
@@ -176,57 +216,42 @@ class HyperliquidLiveExecClientFactory(LiveExecClientFactory):
 
         Returns
         -------
-        LiveExecutionClient
-            The Hyperliquid execution client.
+        HyperliquidExecutionClient
 
         """
-        # Import here to avoid circular imports during startup
-        try:
-            from nautilus_trader.core.nautilus_pyo3 import HyperliquidHttpClient
-            from nautilus_trader.core.nautilus_pyo3 import HyperliquidWebSocketClient
-        except ImportError:
-            # Fallback for development - create dummy clients
-            class DummyHttpClient:
-                def __init__(self, *args, **kwargs):
-                    pass
-                    
-            class DummyWebSocketClient:
-                def __init__(self, *args, **kwargs):
-                    pass
-                    
-            HyperliquidHttpClient = DummyHttpClient
-            HyperliquidWebSocketClient = DummyWebSocketClient
-
-        # Determine base URLs
-        if config.testnet:
-            base_url = config.base_url or "https://api.hyperliquid-testnet.xyz"
-            ws_base_url = config.ws_base_url or "wss://api.hyperliquid-testnet.xyz/ws"
-        else:
-            base_url = config.base_url or "https://api.hyperliquid.xyz"
-            ws_base_url = config.ws_base_url or "wss://api.hyperliquid.xyz/ws"
-
-        # Create HTTP client with authentication
-        http_client = HyperliquidHttpClient(
-            base_url=base_url,
-            timeout=config.timeout_connection * 1000,  # Convert to milliseconds
-            api_key=config.api_key,
-            api_secret=config.api_secret.get_secret_value() if config.api_secret else None,
+        client = get_cached_hyperliquid_http_client(
+            private_key=config.private_key,
+            wallet_address=config.wallet_address,
+            base_url=config.base_url_http,
+            timeout_secs=config.http_timeout_secs or 60,
+            testnet=config.testnet,
         )
 
-        # Create WebSocket client with authentication
-        ws_client = HyperliquidWebSocketClient(
-            base_url=ws_base_url,
-            api_key=config.api_key,
-            api_secret=config.api_secret.get_secret_value() if config.api_secret else None,
+        ws_client = get_cached_hyperliquid_websocket_client(
+            private_key=config.private_key,
+            wallet_address=config.wallet_address,
+            base_url=config.base_url_ws,
+            testnet=config.testnet,
         )
 
-        # Create and return the execution client
+        # Create and load the instrument provider
+        provider = HyperliquidInstrumentProvider(
+            client=client,
+            config=InstrumentProviderConfig(
+                load_all=True,
+                load_ids=None,
+                filters=None,
+            ),
+        )
+
         return HyperliquidExecutionClient(
             loop=loop,
-            client=http_client,
+            client=client,
             ws_client=ws_client,
             msgbus=msgbus,
             cache=cache,
             clock=clock,
-            config=config,
+            instrument_provider=provider,
+            base_url_http=config.base_url_http,
+            base_url_ws=config.base_url_ws,
         )

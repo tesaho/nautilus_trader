@@ -13,275 +13,133 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 
-"""
-Instrument provider for Hyperliquid.
-"""
+from typing import Any
 
-from __future__ import annotations
-
-import asyncio
-from decimal import Decimal
-from typing import TYPE_CHECKING, Any
-
-from nautilus_trader.adapters.hyperliquid.config import HyperliquidDataClientConfig
 from nautilus_trader.adapters.hyperliquid.constants import HYPERLIQUID_VENUE
-from nautilus_trader.core.correctness import PyCondition
-from nautilus_trader.core.uuid import UUID4
-from nautilus_trader.model.instruments.crypto_perpetual import CryptoPerpetual
-from nautilus_trader.model.currencies import USD
-from nautilus_trader.model.enums import AssetClass, InstrumentClass
-from nautilus_trader.model.identifiers import InstrumentId, Symbol
-from nautilus_trader.model.instruments import Instrument
-from nautilus_trader.model.objects import Currency, Money, Price, Quantity
 from nautilus_trader.common.providers import InstrumentProvider
-
-if TYPE_CHECKING:
-    from collections.abc import Coroutine
+from nautilus_trader.config import InstrumentProviderConfig
+from nautilus_trader.core import nautilus_pyo3
+from nautilus_trader.core.correctness import PyCondition
+from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.model.instruments import instruments_from_pyo3
 
 
 class HyperliquidInstrumentProvider(InstrumentProvider):
     """
-    Provides a means of loading instruments from Hyperliquid.
+    Provides Nautilus instrument definitions from Hyperliquid.
 
     Parameters
     ----------
-    client : HyperliquidHttpClient
+    client : nautilus_pyo3.HyperliquidHttpClient
         The Hyperliquid HTTP client.
-    config : HyperliquidDataClientConfig
-        The data client configuration.
+    config : InstrumentProviderConfig, optional
+        The instrument provider configuration, by default None.
 
     """
 
     def __init__(
         self,
-        client: Any,  # HyperliquidHttpClient type hint causes circular import
-        config: HyperliquidDataClientConfig,
+        client: nautilus_pyo3.HyperliquidHttpClient,
+        config: InstrumentProviderConfig | None = None,
     ) -> None:
-        super().__init__()
-
+        super().__init__(config=config)
         self._client = client
-        self._config = config
-        
-        # Cache for loaded instruments
-        self._instruments: dict[InstrumentId, Instrument] = {}
+        self._log_warnings = config.log_warnings if config else True
 
-    async def load_all_async(self, correlation_id: UUID4 | None = None) -> None:
+        self._instruments_pyo3: list[nautilus_pyo3.Instrument] = []
+
+    def instruments_pyo3(self) -> list[Any]:
         """
-        Load all instruments for the Hyperliquid venue.
+        Return all Hyperliquid PyO3 instrument definitions held by the provider.
 
-        Parameters
-        ----------
-        correlation_id : UUID4, optional
-            The correlation ID for the request.
+        Returns
+        -------
+        list[nautilus_pyo3.Instrument]
 
         """
-        PyCondition.not_none(self._client, "client")
-        
+        return self._instruments_pyo3
+
+    async def load_all_async(self, filters: dict | None = None) -> None:
+        filters_str = "..." if not filters else f" with filters {filters}..."
+        self._log.info(f"Loading all instruments{filters_str}")
+
+        all_pyo3_instruments = []
+
         try:
-            # Get market metadata from Hyperliquid
-            meta = await self._client.get_meta()
+            # Get universe from Hyperliquid
+            universe = await self._client.get_universe()
             
-            instruments: list[Instrument] = []
-            
-            # Parse universe (perpetual futures)
-            if hasattr(meta, 'universe') and meta.universe:
-                for asset_info in meta.universe:
-                    instrument = self._parse_instrument_info(asset_info)
-                    if instrument:
-                        instruments.append(instrument)
-                        self._instruments[instrument.id] = instrument
+            # Convert universe to instruments
+            pyo3_instruments = await self._client.parse_instruments_pyo3(universe)
+            all_pyo3_instruments.extend(pyo3_instruments)
 
-            # Load instruments into the provider
-            self.add_instruments(instruments)
-            
-            self._log.info(f"Loaded {len(instruments)} Hyperliquid instruments")
-            
         except Exception as e:
-            self._log.error(f"Failed to load Hyperliquid instruments: {e}")
+            self._log.error(f"Error loading instruments from Hyperliquid: {e}")
+            if self._log_warnings:
+                self._log.warning(f"Failed to load instruments: {e}")
+            return
+
+        if not all_pyo3_instruments:
+            self._log.warning("No instruments loaded")
+            return
+
+        self._log.info(f"Loaded {len(all_pyo3_instruments)} instruments")
+
+        # Store the PyO3 instruments
+        self._instruments_pyo3 = all_pyo3_instruments
+
+        # Convert to Nautilus instruments and add to internal collection
+        nautilus_instruments = instruments_from_pyo3(all_pyo3_instruments, log_warnings=self._log_warnings)
+        for instrument in nautilus_instruments:
+            self.add(instrument)
 
     async def load_ids_async(
         self,
         instrument_ids: list[InstrumentId],
-        correlation_id: UUID4 | None = None,
+        filters: dict | None = None,
     ) -> None:
-        """
-        Load specific instruments by their IDs.
+        if not instrument_ids:
+            self._log.info("No instrument IDs provided")
+            return
 
-        Parameters
-        ----------
-        instrument_ids : list[InstrumentId]
-            The instrument IDs to load.
-        correlation_id : UUID4, optional
-            The correlation ID for the request.
+        # Filter for Hyperliquid venue
+        hyperliquid_ids = [
+            instrument_id for instrument_id in instrument_ids
+            if instrument_id.venue == HYPERLIQUID_VENUE
+        ]
 
-        """
-        # For now, we load all instruments and filter
-        await self.load_all_async(correlation_id)
+        if not hyperliquid_ids:
+            self._log.info("No Hyperliquid instrument IDs to load")
+            return
+
+        filters_str = f"with filters {filters}" if filters else ""
+        self._log.info(
+            f"Loading instruments {[str(i) for i in hyperliquid_ids]} {filters_str}",
+        )
+
+        # For Hyperliquid, we need to load all instruments first since
+        # the API doesn't support loading individual instruments by ID
+        await self.load_all_async(filters)
+
+        # Filter to requested instruments
+        requested_instruments = []
+        for instrument_id in hyperliquid_ids:
+            instrument = self.find(instrument_id)
+            if instrument:
+                requested_instruments.append(instrument)
+            else:
+                self._log.warning(f"Could not find instrument {instrument_id}")
+
+        # Clear all instruments and add only requested ones
+        self.clear()
+        for instrument in requested_instruments:
+            self.add(instrument)
 
     async def load_async(
         self,
         instrument_id: InstrumentId,
-        correlation_id: UUID4 | None = None,
+        filters: dict | None = None,
     ) -> None:
-        """
-        Load a specific instrument.
+        PyCondition.not_none(instrument_id, "instrument_id")
 
-        Parameters
-        ----------
-        instrument_id : InstrumentId
-            The instrument ID to load.
-        correlation_id : UUID4, optional
-            The correlation ID for the request.
-
-        """
-        # Check if already loaded
-        if instrument_id in self._instruments:
-            return
-
-        # Load all instruments (Hyperliquid API doesn't support single instrument queries)
-        await self.load_all_async(correlation_id)
-
-    def _parse_instrument_info(self, asset_info: Any) -> Instrument | None:
-        """
-        Parse instrument information from Hyperliquid API response.
-
-        Parameters
-        ----------
-        asset_info : Any
-            The asset information from the API.
-
-        Returns
-        -------
-        Instrument | None
-            The parsed instrument or None if parsing failed.
-
-        """
-        try:
-            # Extract asset information
-            if hasattr(asset_info, 'name'):
-                symbol_name = asset_info.name
-            else:
-                # Handle dictionary format
-                symbol_name = asset_info.get('name', '')
-
-            if not symbol_name:
-                return None
-
-            # Create instrument ID
-            symbol = Symbol(f"{symbol_name}-USD")
-            instrument_id = InstrumentId(symbol, HYPERLIQUID_VENUE)
-
-            # Extract size decimals for precision
-            if hasattr(asset_info, 'szDecimals'):
-                size_decimals = asset_info.szDecimals
-            else:
-                size_decimals = asset_info.get('szDecimals', 6)
-
-            # Calculate tick size and step size
-            price_precision = 6  # Hyperliquid typically uses 6 decimal places for prices
-            size_precision = max(0, size_decimals)
-            
-            tick_size = Decimal(f"1e-{price_precision}")
-            step_size = Decimal(f"1e-{size_precision}")
-
-            # Extract maximum leverage
-            if hasattr(asset_info, 'maxLeverage'):
-                max_leverage = asset_info.maxLeverage
-            else:
-                max_leverage = asset_info.get('maxLeverage', 50)
-
-            # Create the instrument (CryptoPerpetual for Hyperliquid)
-            instrument = CryptoPerpetual(
-                instrument_id=instrument_id,
-                raw_symbol=Symbol(symbol_name),
-                base_currency=self._get_base_currency(symbol_name),
-                quote_currency=USD,  # All Hyperliquid perpetuals are quoted in USD
-                settlement_currency=USD,
-                is_inverse=False,  # Hyperliquid uses linear contracts
-                price_precision=price_precision,
-                size_precision=size_precision,
-                price_increment=Price(tick_size, precision=price_precision),
-                size_increment=Quantity(step_size, precision=size_precision),
-                max_quantity=None,  # Not specified by Hyperliquid
-                min_quantity=Quantity(step_size, precision=size_precision),
-                max_notional=None,  # Not specified by Hyperliquid
-                min_notional=Money(1.0, USD),  # Minimum $1 notional
-                max_price=None,  # Not specified
-                min_price=Price(tick_size, precision=price_precision),
-                margin_init=Decimal(1) / Decimal(max_leverage),  # Initial margin = 1/leverage
-                margin_maint=Decimal(1) / Decimal(max_leverage * 2),  # Maintenance margin (estimated)
-                maker_fee=Decimal("0.0002"),  # 0.02% (typical for Hyperliquid)
-                taker_fee=Decimal("0.0005"),  # 0.05% (typical for Hyperliquid)
-                ts_event=0,
-                ts_init=0,
-            )
-
-            return instrument
-
-        except Exception as e:
-            self._log.error(f"Failed to parse instrument info {asset_info}: {e}")
-            return None
-
-    def _get_base_currency(self, symbol: str) -> Currency:
-        """
-        Get the base currency for a symbol.
-
-        Parameters
-        ----------
-        symbol : str
-            The symbol name.
-
-        Returns
-        -------
-        Currency
-            The base currency.
-
-        """
-        # Map common symbols to currencies
-        currency_map = {
-            "BTC": Currency.from_str("BTC"),
-            "ETH": Currency.from_str("ETH"),
-            "SOL": Currency.from_str("SOL"),
-            "AVAX": Currency.from_str("AVAX"),
-            "MATIC": Currency.from_str("MATIC"),
-            "ADA": Currency.from_str("ADA"),
-            "DOT": Currency.from_str("DOT"),
-            "LINK": Currency.from_str("LINK"),
-            "UNI": Currency.from_str("UNI"),
-            "AAVE": Currency.from_str("AAVE"),
-        }
-
-        # Try to get from map, otherwise create new currency
-        if symbol in currency_map:
-            return currency_map[symbol]
-        else:
-            return Currency.from_str(symbol)
-
-    def get_all(self) -> dict[InstrumentId, Instrument]:
-        """
-        Return all loaded instruments.
-
-        Returns
-        -------
-        dict[InstrumentId, Instrument]
-            All loaded instruments.
-
-        """
-        return self._instruments.copy()
-
-    def find(self, instrument_id: InstrumentId) -> Instrument | None:
-        """
-        Find an instrument by its ID.
-
-        Parameters
-        ----------
-        instrument_id : InstrumentId
-            The instrument ID to find.
-
-        Returns
-        -------
-        Instrument | None
-            The instrument if found, otherwise None.
-
-        """
-        return self._instruments.get(instrument_id)
+        await self.load_ids_async([instrument_id], filters)
