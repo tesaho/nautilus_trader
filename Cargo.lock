@@ -6669,6 +6669,7 @@ dependencies = [
  "nautilus-dydx",
  "nautilus-execution",
  "nautilus-hyperliquid",
+ "nautilus-hyperliquid2",
  "nautilus-indicators",
  "nautilus-infrastructure",
  "nautilus-kraken",
