@@ -63,6 +63,7 @@ class HistoricInteractiveBrokersClient:
         market_data_type: MarketDataTypeEnum = MarketDataTypeEnum.REALTIME,
         log_level: str = "INFO",
         cache_config: CacheConfig | None = None,
+        instrument_provider_config: InteractiveBrokersInstrumentProviderConfig | None = None,
     ) -> None:
         loop = get_event_loop()
 
@@ -110,6 +111,17 @@ class HistoricInteractiveBrokersClient:
         )
         self._client.start()
 
+        # Store instrument provider config and create provider once
+        if instrument_provider_config is None:
+            instrument_provider_config = InteractiveBrokersInstrumentProviderConfig()
+
+        self._instrument_provider_config = instrument_provider_config
+        self._instrument_provider = InteractiveBrokersInstrumentProvider(
+            self._client,
+            self._clock,
+            instrument_provider_config,
+        )
+
     async def connect(self) -> None:
         # Connect client
         await self._client.wait_until_ready()
@@ -120,41 +132,36 @@ class HistoricInteractiveBrokersClient:
 
     async def request_instruments(
         self,
-        instrument_ids: list[str] | None = None,
+        instrument_ids: list[str | InstrumentId] | None = None,
         contracts: list[IBContract] | None = None,
-        instrument_provider_config: InteractiveBrokersInstrumentProviderConfig | None = None,
     ) -> list[Instrument]:
         """
-        Return Instruments given either a InteractiveBrokersInstrumentProviderConfig or
-        a list of IBContracts and/or InstrumentId strings.
+        Return Instruments given a list of IBContracts and/or InstrumentId strings.
 
         Parameters
         ----------
-        instrument_ids : list[str], default 'None'
+        instrument_ids : list[str | InstrumentId], default 'None'
             Instrument IDs (e.g. AAPL.NASDAQ) defining which instruments to retrieve.
+            Can be strings or InstrumentId objects.
         contracts : list[IBContract], default 'None'
             IBContracts defining which instruments to retrieve.
-        instrument_provider_config : InteractiveBrokersInstrumentProviderConfig
-            An instrument provider config defining which instruments to retrieve.
 
         Returns
         -------
         list[Instrument]
 
         """
-        if instrument_provider_config is None:
-            instrument_provider_config = InteractiveBrokersInstrumentProviderConfig()
+        # Convert string instrument_ids to InstrumentId objects
+        converted_instrument_ids = [
+            InstrumentId.from_str(instrument_id) if isinstance(instrument_id, str) else instrument_id
+            for instrument_id in (instrument_ids or [])
+        ]
 
-        instrument_provider = InteractiveBrokersInstrumentProvider(
-            self._client,
-            self._clock,
-            instrument_provider_config,
-        )
-        await instrument_provider.load_ids_async((instrument_ids or []) + (contracts or []))
+        await self._instrument_provider.load_ids_async(converted_instrument_ids + (contracts or []))
 
-        return list(instrument_provider._instruments.values())
+        return list(self._instrument_provider._instruments.values())
 
-    async def request_bars(  # noqa C901
+    async def request_bars(  # noqa: C901
         self,
         bar_specifications: list[str],
         end_date_time: datetime.datetime,
@@ -162,8 +169,7 @@ class HistoricInteractiveBrokersClient:
         start_date_time: datetime.datetime | None = None,
         duration: str | None = None,
         contracts: list[IBContract] | None = None,
-        instrument_ids: list[str] | None = None,
-        instrument_provider_config: InteractiveBrokersInstrumentProviderConfig | None = None,
+        instrument_ids: list[str | InstrumentId] | None = None,
         use_rth: bool = True,
         timeout: int = 120,
     ) -> list[Bar]:
@@ -189,10 +195,9 @@ class HistoricInteractiveBrokersClient:
             for seconds, days, weeks, months, or years respectively.
         contracts : list[IBContract], default 'None'
             IBContracts defining which bars to retrieve.
-        instrument_ids : list[str], default 'None'
+        instrument_ids : list[str | InstrumentId], default 'None'
             Instrument IDs (e.g. AAPL.NASDAQ) defining which bars to retrieve.
-        instrument_provider_config : InteractiveBrokersInstrumentProviderConfig, optional
-            Configuration for the instrument provider to determine venues and handle symbology.
+            Can be strings or InstrumentId objects.
         use_rth : bool, default 'True'
             Whether to use regular trading hours.
         timeout : int, default 120
@@ -229,37 +234,27 @@ class HistoricInteractiveBrokersClient:
         if not contracts and not instrument_ids:
             raise ValueError("Either contracts or instrument_ids must be provided")
 
-        # Create instrument provider with provided config or default
-        if instrument_provider_config is None:
-            instrument_provider_config = InteractiveBrokersInstrumentProviderConfig()
-
-        instrument_provider = InteractiveBrokersInstrumentProvider(
-            self._client,
-            self._clock,
-            instrument_provider_config,
-        )
-
-        # Convert instrument_id strings to IBContracts
+        # Convert instrument_id strings or InstrumentId objects to IBContracts
         contracts.extend(
             [
-                await instrument_provider.instrument_id_to_ib_contract(
-                    InstrumentId.from_str(instrument_id),
+                await self._instrument_provider.instrument_id_to_ib_contract(
+                    InstrumentId.from_str(instrument_id) if isinstance(instrument_id, str) else instrument_id,
                 )
                 for instrument_id in instrument_ids
             ],
         )
 
         # Ensure instruments are fetched and cached
-        await self._fetch_instruments_if_not_cached(contracts, instrument_provider_config)
+        await self._fetch_instruments_if_not_cached(contracts)
         data: list[Bar] = []
 
         for contract in contracts:
             for bar_spec in bar_specifications:
-                venue = instrument_provider.determine_venue_from_contract(contract)
+                venue = self._instrument_provider.determine_venue_from_contract(contract)
                 instrument_id = ib_contract_to_instrument_id(
                     contract,
                     venue,
-                    instrument_provider_config.symbology_method,
+                    self._instrument_provider_config.symbology_method,
                 )
                 bar_type = BarType(
                     instrument_id,
@@ -303,8 +298,7 @@ class HistoricInteractiveBrokersClient:
         end_date_time: datetime.datetime,
         tz_name: str,
         contracts: list[IBContract] | None = None,
-        instrument_ids: list[str] | None = None,
-        instrument_provider_config: InteractiveBrokersInstrumentProviderConfig | None = None,
+        instrument_ids: list[str | InstrumentId] | None = None,
         use_rth: bool = True,
         timeout: int = 60,
     ) -> list[TradeTick | QuoteTick]:
@@ -324,10 +318,9 @@ class HistoricInteractiveBrokersClient:
             The timezone to use. (e.g. 'America/New_York', 'UTC')
         contracts : list[IBContract], default 'None'
             IBContracts defining which ticks to retrieve.
-        instrument_ids : list[str], default 'None'
+        instrument_ids : list[str | InstrumentId], default 'None'
             Instrument IDs (e.g. AAPL.NASDAQ) defining which ticks to retrieve.
-        instrument_provider_config : InteractiveBrokersInstrumentProviderConfig, optional
-            Configuration for the instrument provider to determine venues and handle symbology.
+            Can be strings or InstrumentId objects.
         use_rth : bool, default 'True'
             Whether to use regular trading hours.
         timeout : int, default 60
@@ -361,35 +354,26 @@ class HistoricInteractiveBrokersClient:
         if not contracts and not instrument_ids:
             raise ValueError("Either contracts or instrument_ids must be provided")
 
-        if instrument_provider_config is None:
-            instrument_provider_config = InteractiveBrokersInstrumentProviderConfig()
-
-        instrument_provider = InteractiveBrokersInstrumentProvider(
-            self._client,
-            self._clock,
-            instrument_provider_config,
-        )
-
-        # Convert instrument_id strings to IBContracts
+        # Convert instrument_id strings or InstrumentId objects to IBContracts
         contracts.extend(
             [
-                await instrument_provider.instrument_id_to_ib_contract(
-                    InstrumentId.from_str(instrument_id),
+                await self._instrument_provider.instrument_id_to_ib_contract(
+                    InstrumentId.from_str(instrument_id) if isinstance(instrument_id, str) else instrument_id,
                 )
                 for instrument_id in instrument_ids
             ],
         )
 
         # Ensure instruments are fetched and cached
-        await self._fetch_instruments_if_not_cached(contracts, instrument_provider_config)
+        await self._fetch_instruments_if_not_cached(contracts)
         data: list[TradeTick | QuoteTick] = []
 
         for contract in contracts:
-            venue = instrument_provider.determine_venue_from_contract(contract)
+            venue = self._instrument_provider.determine_venue_from_contract(contract)
             instrument_id = ib_contract_to_instrument_id(
                 contract,
                 venue,
-                instrument_provider_config.symbology_method,
+                self._instrument_provider_config.symbology_method,
             )
             current_start_date_time = start_date_time
 
@@ -470,7 +454,6 @@ class HistoricInteractiveBrokersClient:
     async def _fetch_instruments_if_not_cached(
         self,
         contracts: list[IBContract],
-        instrument_provider_config: InteractiveBrokersInstrumentProviderConfig,
     ) -> None:
         """
         Fetch and cache Instruments for the given IBContracts if they are not already
@@ -480,33 +463,23 @@ class HistoricInteractiveBrokersClient:
         ----------
         contracts : list[IBContract]
             A list of IBContracts to fetch Instruments for.
-        instrument_provider_config : InteractiveBrokersInstrumentProviderConfig
-            Configuration for the instrument provider to determine venues and handle symbology.
 
         Returns
         -------
         None
 
         """
-        # Create instrument provider to use its venue determination logic
-        instrument_provider = InteractiveBrokersInstrumentProvider(
-            self._client,
-            self._clock,
-            instrument_provider_config,
-        )
-
         for contract in contracts:
-            venue = instrument_provider.determine_venue_from_contract(contract)
+            venue = self._instrument_provider.determine_venue_from_contract(contract)
             instrument_id = ib_contract_to_instrument_id(
                 contract,
                 venue,
-                instrument_provider_config.symbology_method,
+                self._instrument_provider_config.symbology_method,
             )
 
             if not self._client._cache.instrument(instrument_id):
                 self.log.info(f"Fetching Instrument for: {instrument_id}")
                 await self.request_instruments(
-                    instrument_provider_config=instrument_provider_config,
                     contracts=[contract],
                 )
 

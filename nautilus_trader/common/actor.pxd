@@ -21,6 +21,7 @@ from nautilus_trader.common.component cimport Clock
 from nautilus_trader.common.component cimport Component
 from nautilus_trader.common.component cimport Logger
 from nautilus_trader.common.component cimport MessageBus
+from nautilus_trader.common.data_topics cimport TopicCache
 from nautilus_trader.core.data cimport Data
 from nautilus_trader.core.message cimport Event
 from nautilus_trader.core.rust.model cimport BookType
@@ -31,6 +32,7 @@ from nautilus_trader.data.messages cimport RequestData
 from nautilus_trader.indicators.base cimport Indicator
 from nautilus_trader.model.book cimport OrderBook
 from nautilus_trader.model.data cimport Bar
+from nautilus_trader.model.data cimport BarSpecification
 from nautilus_trader.model.data cimport BarType
 from nautilus_trader.model.data cimport DataType
 from nautilus_trader.model.data cimport FundingRateUpdate
@@ -55,14 +57,16 @@ cdef class Actor(Component):
     cdef object _executor
     cdef bint _log_events
     cdef bint _log_commands
+    cdef TopicCache _topic_cache
     cdef set[type] _warning_events
+    cdef dict[UUID4, RequestData] _requests
     cdef dict[UUID4, object] _pending_requests
     cdef set[type] _pyo3_conversion_types
     cdef dict[str, type] _signal_classes
     cdef list[Indicator] _indicators
     cdef dict[InstrumentId, list[Indicator]] _indicators_for_quotes
     cdef dict[InstrumentId, list[Indicator]] _indicators_for_trades
-    cdef dict[BarType, list[Indicator]] _indicators_for_bars
+    cdef dict[tuple[InstrumentId, BarSpecification], list[Indicator]] _indicators_for_bars
 
     cdef readonly PortfolioFacade portfolio
     """The read-only portfolio for the actor.\n\n:returns: `PortfolioFacade`"""
@@ -217,8 +221,9 @@ cdef class Actor(Component):
         datetime end=*,
         int limit=*,
         callback=*,
-        update_catalog: bool = *,
+        bint update_catalog=*,
         dict[str, object] params=*,
+        bint join_request=*,
     )
     cpdef UUID4 request_instrument(
         self,
@@ -227,8 +232,9 @@ cdef class Actor(Component):
         datetime end=*,
         ClientId client_id=*,
         callback=*,
-        update_catalog: bool = *,
+        bint update_catalog=*,
         dict[str, object] params=*,
+        bint join_request=*,
     )
     cpdef UUID4 request_instruments(
         self,
@@ -237,8 +243,9 @@ cdef class Actor(Component):
         datetime end=*,
         ClientId client_id=*,
         callback=*,
-        update_catalog: bool = *,
+        bint update_catalog=*,
         dict[str, object] params=*,
+        bint join_request=*,
     )
     cpdef UUID4 request_order_book_snapshot(
         self,
@@ -247,6 +254,7 @@ cdef class Actor(Component):
         ClientId client_id=*,
         callback=*,
         dict[str, object] params=*,
+        bint join_request=*,
     )
     cpdef UUID4 request_order_book_depth(
         self,
@@ -259,6 +267,7 @@ cdef class Actor(Component):
         callback=*,
         bint update_catalog=*,
         dict params=*,
+        bint join_request=*,
     )
     cpdef UUID4 request_quote_ticks(
         self,
@@ -268,8 +277,9 @@ cdef class Actor(Component):
         int limit=*,
         ClientId client_id=*,
         callback=*,
-        update_catalog: bool = *,
+        bint update_catalog=*,
         dict[str, object] params=*,
+        bint join_request=*,
     )
     cpdef UUID4 request_trade_ticks(
         self,
@@ -279,8 +289,9 @@ cdef class Actor(Component):
         int limit=*,
         ClientId client_id=*,
         callback=*,
-        update_catalog: bool = *,
+        bint update_catalog=*,
         dict[str, object] params=*,
+        bint join_request=*,
     )
     cpdef UUID4 request_bars(
         self,
@@ -290,8 +301,9 @@ cdef class Actor(Component):
         int limit=*,
         ClientId client_id=*,
         callback=*,
-        update_catalog: bool = *,
+        bint update_catalog=*,
         dict[str, object] params=*,
+        bint join_request=*,
     )
     cpdef UUID4 request_aggregated_bars(
         self,
@@ -303,7 +315,17 @@ cdef class Actor(Component):
         callback=*,
         bint include_external_data=*,
         bint update_subscriptions=*,
-        update_catalog: bool = *,
+        bint update_catalog=*,
+        dict[str, object] params=*,
+    )
+    cpdef UUID4 request_join(
+        self,
+        tuple request_ids,
+        datetime start,
+        datetime end=*,
+        ClientId client_id=*,
+        Venue venue=*,
+        callback=*,
         dict[str, object] params=*,
     )
     cpdef bint is_pending_request(self, UUID4 request_id)
@@ -313,19 +335,19 @@ cdef class Actor(Component):
 # -- HANDLERS -------------------------------------------------------------------------------------
 
     cpdef void handle_instrument(self, Instrument instrument)
-    cpdef void handle_instruments(self, list instruments)
     cpdef void handle_order_book(self, OrderBook order_book)
     cpdef void handle_order_book_deltas(self, deltas)
-    cpdef void handle_order_book_depth(self, OrderBookDepth10 depth)
-    cpdef void handle_quote_tick(self, QuoteTick tick)
-    cpdef void handle_quote_ticks(self, list ticks)
-    cpdef void handle_trade_tick(self, TradeTick tick)
-    cpdef void handle_trade_ticks(self, list ticks)
+    cpdef void handle_historical_order_book_depth(self, OrderBookDepth10 depth)
+    cpdef void handle_order_book_depth(self, OrderBookDepth10 depth, bint historical=*)
+    cpdef void handle_historical_quote_tick(self, QuoteTick tick)
+    cpdef void handle_quote_tick(self, QuoteTick tick, bint historical=*)
+    cpdef void handle_historical_trade_tick(self, TradeTick tick)
+    cpdef void handle_trade_tick(self, TradeTick tick, bint historical=*)
     cpdef void handle_mark_price(self, MarkPriceUpdate mark_price)
     cpdef void handle_index_price(self, IndexPriceUpdate index_price)
     cpdef void handle_funding_rate(self, FundingRateUpdate funding_rate)
-    cpdef void handle_bar(self, Bar bar)
-    cpdef void handle_bars(self, list bars)
+    cpdef void handle_historical_bar(self, Bar bar)
+    cpdef void handle_bar(self, Bar bar, bint historical=*)
     cpdef void handle_data(self, Data data)
     cpdef void handle_signal(self, Data signal)
     cpdef void handle_instrument_status(self, InstrumentStatus data)
@@ -336,11 +358,14 @@ cdef class Actor(Component):
 # -- HANDLERS -------------------------------------------------------------------------------------
 
     cpdef void _handle_data_response(self, DataResponse response)
+    cpdef void _handle_join_response(self, DataResponse response)
     cpdef void _handle_instruments_response(self, DataResponse response)
     cpdef void _handle_quote_ticks_response(self, DataResponse response)
     cpdef void _handle_trade_ticks_response(self, DataResponse response)
+    cpdef void _handle_order_book_depth_response(self, DataResponse response)
     cpdef void _handle_bars_response(self, DataResponse response)
     cpdef void _handle_aggregated_bars_response(self, DataResponse response)
+    cpdef void _unsubscribe_historical_aggregated_bars(self, tuple bar_types, bint include_external_data = *)
     cpdef void _handle_order_filled(self, OrderFilled fill)
     cpdef void _finish_response(self, UUID4 request_id)
     cpdef void _handle_indicators_for_quote(self, list indicators, QuoteTick tick)
