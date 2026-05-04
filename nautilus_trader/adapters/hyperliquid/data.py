@@ -119,22 +119,12 @@ class HyperliquidDataClient(LiveMarketDataClient):
         # TODO: HyperliquidHttpClient doesn't expose api_key attribute yet
         self._log.info("HTTP client initialized", LogColor.BLUE)
 
-        # WebSocket clients
+        # WebSocket clients (created lazily in _connect based on loaded instruments)
         self._ws_clients: dict[
             nautilus_pyo3.HyperliquidProductType,
             nautilus_pyo3.HyperliquidWebSocketClient,
         ] = {}
         self._ws_client_futures: set[asyncio.Future] = set()
-
-        for product_type_str in ["PERP", "SPOT"]:
-            product_type = nautilus_pyo3.HyperliquidProductType.from_str(product_type_str)
-            ws_client = nautilus_pyo3.HyperliquidWebSocketClient(
-                url=config.base_url_ws,
-                testnet=config.testnet,
-                product_type=product_type,
-            )
-            self._ws_clients[product_type] = ws_client
-            self._log.info(f"Initialized WebSocket client for {product_type_str}", LogColor.BLUE)
 
     @property
     def instrument_provider(self) -> HyperliquidInstrumentProvider:
@@ -147,17 +137,63 @@ class HyperliquidDataClient(LiveMarketDataClient):
 
         instruments = self.instrument_provider.instruments_pyo3()
 
-        # Connect all WebSocket clients
-        for product_type_str, ws_client in self._ws_clients.items():
+        # Determine which product types need WebSocket connections
+        if self._config.product_types:
+            # Explicit config: use specified product types
+            needed_types = [
+                nautilus_pyo3.HyperliquidProductType.from_str(t)
+                for t in self._config.product_types
+            ]
+            self._log.info(
+                f"Using configured product_types: {self._config.product_types}",
+                LogColor.BLUE,
+            )
+        else:
+            # Auto-detect from configured instrument IDs (load_ids),
+            # falling back to all loaded instruments if load_all=True
+            needed_types_set: set[nautilus_pyo3.HyperliquidProductType] = set()
+            load_ids = self._config.instrument_provider.load_ids
+            if load_ids:
+                # Detect from the specific instruments the user requested
+                for iid in load_ids:
+                    try:
+                        symbol = iid.symbol.value if hasattr(iid, 'symbol') else str(iid).split('.')[0]
+                        pt = nautilus_pyo3.hyperliquid_product_type_from_symbol(symbol)
+                        needed_types_set.add(pt)
+                    except Exception:
+                        pass
+            else:
+                # load_all=True: detect from all loaded instruments
+                for inst in instruments:
+                    try:
+                        pt = nautilus_pyo3.hyperliquid_product_type_from_symbol(
+                            inst.id.symbol.value,
+                        )
+                        needed_types_set.add(pt)
+                    except Exception:
+                        pass
+            needed_types = list(needed_types_set)
+            detected = [str(t) for t in needed_types]
+            self._log.info(
+                f"Auto-detected product types from instruments: {detected}",
+                LogColor.BLUE,
+            )
+
+        # Create and connect only needed WebSocket clients
+        for product_type in needed_types:
+            product_type_str = str(product_type)
+            ws_client = nautilus_pyo3.HyperliquidWebSocketClient(
+                url=self._config.base_url_ws,
+                testnet=self._config.testnet,
+                product_type=product_type,
+            )
+            self._ws_clients[product_type] = ws_client
+            self._log.info(f"Initialized WebSocket client for {product_type_str}", LogColor.BLUE)
+
             await ws_client.connect(
                 instruments,
                 self._handle_msg,
             )
-            # NOTE: wait_until_active is not yet implemented in the Hyperliquid WebSocket client
-            # The connection still works without it, but we lose the synchronization guarantee
-            # that the WebSocket is fully active before subscribing
-            # TODO: Implement wait_until_active in HyperliquidWebSocketClient (Rust side)
-            # await ws_client.wait_until_active(timeout_secs=10.0)
             self._log.info(
                 f"Connected to {product_type_str} WebSocket {ws_client.url}",
                 LogColor.BLUE,

@@ -40,6 +40,11 @@ class HyperliquidDataClientConfig(LiveDataClientConfig, frozen=True):
         If the client is connecting to the Hyperliquid testnet API.
     http_timeout_secs : PositiveInt, default 10
         The timeout (seconds) for HTTP requests.
+    product_types : list[str], optional
+        Product types to create WebSocket connections for (e.g. ["SPOT"], ["PERP"],
+        or ["PERP", "SPOT"]). If ``None`` (default), auto-detects from loaded
+        instruments — only creates WebSocket connections for product types that
+        have matching instruments.
 
     """
 
@@ -49,6 +54,7 @@ class HyperliquidDataClientConfig(LiveDataClientConfig, frozen=True):
     ws_proxy_url: str | None = None
     testnet: bool = False
     http_timeout_secs: PositiveInt = 10
+    product_types: list[str] | None = None
 
 
 class HyperliquidExecClientConfig(LiveExecClientConfig, frozen=True):
