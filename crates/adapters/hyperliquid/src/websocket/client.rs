@@ -244,6 +244,11 @@ impl HyperliquidWebSocketClient {
                 match handler.next().await {
                     Some(NautilusWsMessage::Reconnected) => {
                         tracing::info!("WebSocket reconnected");
+                        // Brief delay to allow the connection to stabilize before
+                        // sending subscription messages. Without this, the subscribe
+                        // messages can race with the connection setup and fail with
+                        // "Sending after closing is not allowed".
+                        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                         resubscribe_all();
                         continue;
                     }
