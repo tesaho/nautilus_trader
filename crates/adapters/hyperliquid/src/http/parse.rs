@@ -221,9 +221,20 @@ pub fn create_instrument_from_def(
     let venue = *HYPERLIQUID_VENUE;
     let instrument_id = InstrumentId::new(symbol, venue);
 
-    // Use base currency as raw_symbol (e.g., "BTC" not "BTC-USD-PERP")
-    // This is what Hyperliquid expects in WebSocket subscriptions
-    let raw_symbol = Symbol::new(def.base);
+    // For perps, raw_symbol is the base currency (e.g., "BTC")
+    // For spot, raw_symbol is the pair index prefixed with "@" (e.g., "@166")
+    // This is what Hyperliquid's WebSocket API expects for subscriptions
+    let raw_symbol = if def.market_type == HyperliquidMarketType::Spot {
+        // Extract pair index from raw_data (SpotPair JSON)
+        let spot_coin = serde_json::from_str::<serde_json::Value>(&def.raw_data)
+            .ok()
+            .and_then(|v| v.get("index").and_then(|i| i.as_u64()))
+            .map(|idx| format!("@{idx}"))
+            .unwrap_or_else(|| def.base.to_string());
+        Symbol::new(Ustr::from(&spot_coin))
+    } else {
+        Symbol::new(def.base)
+    };
     let base_currency = get_currency(&def.base);
     let quote_currency = get_currency(&def.quote);
     let price_increment = Price::from(def.tick_size.to_string());

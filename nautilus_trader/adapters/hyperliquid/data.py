@@ -194,6 +194,10 @@ class HyperliquidDataClient(LiveMarketDataClient):
                 instruments,
                 self._handle_msg,
             )
+            # Brief delay to allow the WebSocket connection to fully stabilize
+            # before subscriptions are sent. Without this, the initial subscribe
+            # messages can be lost if the connection isn't ready yet.
+            await asyncio.sleep(0.5)
             self._log.info(
                 f"Connected to {product_type_str} WebSocket {ws_client.url}",
                 LogColor.BLUE,
